@@ -12,6 +12,7 @@ const {
   LOG_FIELD_NAME = 'Lender Submission Log', // Large Text field that holds the history
   TIMEZONE = 'America/New_York',
   NEWEST_FIRST = 'true',
+  ADD_NOTE = 'true', // also post each shop-out as a contact note
   WEBHOOK_SECRET = '', // optional; if set, the webhook must send it
   GHL_API_BASE = 'https://services.leadconnectorhq.com',
   PORT = 3000,
@@ -108,7 +109,7 @@ function fieldValue(contact, fieldId) {
   return f ? f.value ?? f.field_value ?? f.fieldValue : undefined;
 }
 
-async function processContact({ token, locationId, contactId, lendersFieldId, logFieldId, timeZone }) {
+async function processContact({ token, locationId, contactId, lendersFieldId, logFieldId, timeZone, addNote }) {
   const { contact } = await ghl(token, 'GET', `/contacts/${contactId}`);
   if (!contact) throw new Error(`Contact ${contactId} not found`);
   if (contact.locationId && contact.locationId !== locationId) {
@@ -132,7 +133,22 @@ async function processContact({ token, locationId, contactId, lendersFieldId, lo
       { id: lendersFieldId, field_value: [] },
     ],
   });
-  return { contactId, logged: lenders.length, lenders };
+
+  // The note is a copy for the contact's timeline. It runs after the log is
+  // saved, so if it fails the shop-out is still recorded in the field.
+  let noteAdded = false;
+  let noteError;
+  if (addNote) {
+    try {
+      const body = [`Lender shop-out - ${when}`, ...lenders.map((name) => `- ${name}`)].join('\n');
+      await ghl(token, 'POST', `/contacts/${contactId}/notes`, { body });
+      noteAdded = true;
+    } catch (err) {
+      noteError = err.message;
+      console.error(`[${locationId}] ${contactId}: note not added: ${err.message}`);
+    }
+  }
+  return { contactId, logged: lenders.length, lenders, noteAdded, ...(noteError && { noteError }) };
 }
 
 // Run one job at a time per contact so two quick changes can't overwrite each other.
@@ -167,6 +183,8 @@ app.post('/webhook', async (req, res) => {
 
   const tz = pick(b, ['timezone']);
   const timeZone = tz && validZone(tz) ? tz : TIMEZONE;
+  const noteSetting = pick(b, ['add_note']).toLowerCase();
+  const addNote = noteSetting ? noteSetting !== 'false' : ADD_NOTE !== 'false';
 
   try {
     // Field IDs can be sent directly; otherwise they are found by name.
@@ -184,11 +202,12 @@ app.post('/webhook', async (req, res) => {
     }
 
     const result = await inOrder(contactId, () =>
-      processContact({ token, locationId, contactId, lendersFieldId, logFieldId, timeZone })
+      processContact({ token, locationId, contactId, lendersFieldId, logFieldId, timeZone, addNote })
     );
     console.log(
       result.logged
-        ? `[${locationId}] Logged ${result.logged} lender(s) for ${contactId}: ${result.lenders.join(', ')}`
+        ? `[${locationId}] Logged ${result.logged} lender(s) for ${contactId}: ${result.lenders.join(', ')}` +
+            (result.noteAdded ? ' (+ note)' : '')
         : `[${locationId}] Nothing to log for ${contactId} (Lenders empty)`
     );
     res.json(result);
