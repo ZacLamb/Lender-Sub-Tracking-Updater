@@ -133,8 +133,13 @@ async function findFieldIds(token, locationId, lenderNames, logName) {
     });
   }
 
-  const log = byName(logName);
-  if (!log) throw new Error(`No contact custom field named "${logName}" in location ${locationId}`);
+  // The log field was created per account by name ("Submission Logs"), so its
+  // key varies (contact.submission_logs vs contact.submissions_log). Try the
+  // configured name/key first, then the known spellings.
+  const log = [logName, 'Submission Logs', 'contact.submission_logs', 'contact.submissions_log', 'Lender Submission Log']
+    .map(byName)
+    .find((f) => f && String(f.dataType || '').toUpperCase() !== 'CHECKBOX');
+  if (!log) throw new Error(`No contact custom field named "${logName}" (or "Submission Logs") in location ${locationId}`);
 
   const ids = { lenderFields, logFieldId: log.id };
   fieldCache.set(key, { at: Date.now(), ids });
